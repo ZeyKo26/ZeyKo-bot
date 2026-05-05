@@ -4,11 +4,10 @@ from discord.ext import commands
 import aiosqlite
 import random
 import os
+import time
 
 TOKEN = os.getenv("TOKEN")
-
-# 🔥 MET TON ID DE SERVEUR ICI (important)
-GUILD_ID = 1449102273262391409
+GUILD_ID = 123456789012345678
 guild = discord.Object(id=GUILD_ID)
 
 intents = discord.Intents.default()
@@ -17,8 +16,10 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ---------------- DATABASE ----------------
+cooldowns = {}
+daily = {}
 
+# ---------------- DATABASE ----------------
 async def init_db():
     async with aiosqlite.connect("ultrapro.db") as db:
         await db.execute("""
@@ -30,161 +31,248 @@ async def init_db():
             level INTEGER DEFAULT 1
         )
         """)
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS inventory (
+            user_id INTEGER,
+            item TEXT,
+            amount INTEGER
+        )
+        """)
         await db.commit()
 
 # ---------------- USER ----------------
-
 async def get_user(user_id):
     async with aiosqlite.connect("ultrapro.db") as db:
         async with db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)) as cursor:
             user = await cursor.fetchone()
-
         if not user:
             await db.execute("INSERT INTO users (user_id) VALUES (?)", (user_id,))
             await db.commit()
             return (user_id, 500, 0, 0, 1)
-
         return user
 
-# ---------------- READY ----------------
-
-@bot.event
-async def on_ready():
-    await init_db()
-
-    synced = await bot.tree.sync(guild=guild)
-
-    print(f"Connecté en tant que {bot.user}")
-    print(f"{len(synced)} commandes sync (guild)")
-    print("Bot prêt.")
-
 # ---------------- XP ----------------
-
 async def add_xp(user_id, amount):
     async with aiosqlite.connect("ultrapro.db") as db:
         async with db.execute("SELECT xp, level FROM users WHERE user_id = ?", (user_id,)) as cursor:
-            data = await cursor.fetchone()
+            xp, level = await cursor.fetchone()
 
-        xp, level = data
         xp += amount
+        up = False
 
         if xp >= level * 100:
             level += 1
             xp = 0
+            up = True
 
-        await db.execute("UPDATE users SET xp=?, level=? WHERE user_id=?",
-                         (xp, level, user_id))
+        await db.execute("UPDATE users SET xp=?, level=? WHERE user_id=?", (xp, level, user_id))
         await db.commit()
 
-# ---------------- COMMANDES ----------------
+        return up, level
 
-@bot.tree.command(name="aide", description="Liste des commandes", guild=guild)
+# ---------------- READY ----------------
+@bot.event
+async def on_ready():
+    await init_db()
+    await bot.tree.sync(guild=guild)
+    print("Bot prêt")
+
+# ---------------- AIDE ----------------
+@bot.tree.command(name="aide", guild=guild)
 async def aide(interaction: discord.Interaction):
-    embed = discord.Embed(title="Commandes", color=0x5865F2)
-    embed.add_field(name="💰 Économie", value="/balance /work /gamble", inline=False)
-    embed.add_field(name="🏦 Banque", value="/deposit /withdraw", inline=False)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    msg = """
+📜 Commandes :
 
-# ---------------- BALANCE ----------------
+💰 Économie :
+/balance - Voir ton argent
+/travailler - Gagner de l'argent (4h)
+/parier - Jouer de l'argent
 
+🏦 Banque :
+/deposer - Mettre en banque
+/retirer - Retirer argent
+
+📊 Progression :
+/niveau - Voir ton niveau
+/classement - Top joueurs
+
+🛒 Boutique :
+/boutique - Voir shop
+/acheter - Acheter objet
+/inventaire - Voir objets
+
+🎁 Bonus :
+/quotidien - Récompense toutes les 24h
+"""
+    await interaction.response.send_message(msg, ephemeral=True)
+
+# ---------------- ECONOMIE ----------------
 @bot.tree.command(name="balance", guild=guild)
 async def balance(interaction: discord.Interaction):
     user = await get_user(interaction.user.id)
+    await interaction.response.send_message(f"💰 {user[1]} | 🏦 {user[2]}")
 
-    embed = discord.Embed(
-        title="Ton argent",
-        description=f"Cash: {user[1]} 💰\nBanque: {user[2]} 🏦",
-        color=0x2ecc71
-    )
+@bot.tree.command(name="travailler", guild=guild)
+async def travailler(interaction: discord.Interaction):
+    uid = interaction.user.id
 
-    await interaction.response.send_message(embed=embed)
+    if uid in cooldowns and time.time() - cooldowns[uid] < 14400:
+        return await interaction.response.send_message("⏳ Reviens dans 4h.")
 
-# ---------------- WORK ----------------
+    cooldowns[uid] = time.time()
 
-@bot.tree.command(name="work", guild=guild)
-async def work(interaction: discord.Interaction):
-    gain = random.randint(80, 300)
+    gain = random.randint(100, 400)
 
     async with aiosqlite.connect("ultrapro.db") as db:
-        await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?",
-                         (gain, interaction.user.id))
+        await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (gain, uid))
         await db.commit()
 
-    await add_xp(interaction.user.id, 20)
+    up, level = await add_xp(uid, 25)
 
-    await interaction.response.send_message(f"Tu as gagné {gain} 💰 + 20 XP")
+    msg = f"💼 Tu gagnes {gain} 💰"
 
-# ---------------- GAMBLE ----------------
+    if up:
+        msg += f"\n🎉 Niveau {level} !"
 
-@bot.tree.command(name="gamble", guild=guild)
-async def gamble(interaction: discord.Interaction, amount: int):
+    await interaction.response.send_message(msg)
+
+@bot.tree.command(name="parier", guild=guild)
+async def parier(interaction: discord.Interaction, montant: int):
     user = await get_user(interaction.user.id)
 
-    if amount > user[1]:
-        return await interaction.response.send_message("Pas assez d'argent.")
+    if montant > user[1]:
+        return await interaction.response.send_message("❌ Pas assez d'argent.")
 
     win = random.choice([True, False])
 
     async with aiosqlite.connect("ultrapro.db") as db:
         if win:
-            await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?",
-                             (amount, interaction.user.id))
-            msg = f"Tu gagnes {amount} 💰"
+            await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (montant, interaction.user.id))
+            msg = f"🎉 +{montant}"
         else:
-            await db.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?",
-                             (amount, interaction.user.id))
-            msg = f"Tu perds {amount} 💀"
-
+            await db.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (montant, interaction.user.id))
+            msg = f"💀 -{montant}"
         await db.commit()
 
     await interaction.response.send_message(msg)
 
 # ---------------- BANQUE ----------------
-
-@bot.tree.command(name="deposit", guild=guild)
-async def deposit(interaction: discord.Interaction, amount: int):
+@bot.tree.command(name="deposer", guild=guild)
+async def deposer(interaction: discord.Interaction, montant: int):
     user = await get_user(interaction.user.id)
 
-    if amount > user[1]:
-        return await interaction.response.send_message("Pas assez d'argent.")
+    if montant > user[1]:
+        return await interaction.response.send_message("❌ Pas assez.")
 
     async with aiosqlite.connect("ultrapro.db") as db:
-        await db.execute("""
-        UPDATE users
-        SET balance = balance - ?, bank = bank + ?
-        WHERE user_id = ?
-        """, (amount, amount, interaction.user.id))
+        await db.execute("UPDATE users SET balance = balance - ?, bank = bank + ? WHERE user_id = ?", (montant, montant, interaction.user.id))
         await db.commit()
 
-    await interaction.response.send_message("Argent déposé.")
+    await interaction.response.send_message("🏦 Déposé")
 
-@bot.tree.command(name="withdraw", guild=guild)
-async def withdraw(interaction: discord.Interaction, amount: int):
+@bot.tree.command(name="retirer", guild=guild)
+async def retirer(interaction: discord.Interaction, montant: int):
     user = await get_user(interaction.user.id)
 
-    if amount > user[2]:
-        return await interaction.response.send_message("Pas assez en banque.")
+    if montant > user[2]:
+        return await interaction.response.send_message("❌ Pas assez en banque.")
 
     async with aiosqlite.connect("ultrapro.db") as db:
-        await db.execute("""
-        UPDATE users
-        SET balance = balance + ?, bank = bank - ?
-        WHERE user_id = ?
-        """, (amount, amount, interaction.user.id))
+        await db.execute("UPDATE users SET balance = balance + ?, bank = bank - ? WHERE user_id = ?", (montant, montant, interaction.user.id))
         await db.commit()
 
-    await interaction.response.send_message("Argent retiré.")
+    await interaction.response.send_message("💰 Retiré")
 
-# ---------------- XP CHAT ----------------
+# ---------------- XP ----------------
+@bot.tree.command(name="niveau", guild=guild)
+async def niveau(interaction: discord.Interaction):
+    user = await get_user(interaction.user.id)
+    await interaction.response.send_message(f"Niveau {user[4]} | XP {user[3]}")
 
+@bot.tree.command(name="classement", guild=guild)
+async def classement(interaction: discord.Interaction):
+    async with aiosqlite.connect("ultrapro.db") as db:
+        async with db.execute("SELECT user_id, level FROM users ORDER BY level DESC LIMIT 10") as cursor:
+            data = await cursor.fetchall()
+
+    msg = "🏆 Classement :\n"
+    for i, u in enumerate(data):
+        msg += f"{i+1}. <@{u[0]}> - Niveau {u[1]}\n"
+
+    await interaction.response.send_message(msg)
+
+# ---------------- SHOP ----------------
+shop = {"pizza":100, "pc":1000, "voiture":5000}
+
+@bot.tree.command(name="boutique", guild=guild)
+async def boutique(interaction: discord.Interaction):
+    msg = "🛒 Boutique :\n"
+    for i, p in shop.items():
+        msg += f"{i} - {p} 💰\n"
+    await interaction.response.send_message(msg)
+
+@bot.tree.command(name="acheter", guild=guild)
+async def acheter(interaction: discord.Interaction, objet: str):
+    user = await get_user(interaction.user.id)
+
+    if objet not in shop:
+        return await interaction.response.send_message("❌ Objet inconnu.")
+
+    prix = shop[objet]
+
+    if user[1] < prix:
+        return await interaction.response.send_message("❌ Pas assez.")
+
+    async with aiosqlite.connect("ultrapro.db") as db:
+        await db.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (prix, interaction.user.id))
+        await db.execute("INSERT INTO inventory VALUES (?, ?, 1)", (interaction.user.id, objet))
+        await db.commit()
+
+    await interaction.response.send_message(f"✅ Acheté : {objet}")
+
+@bot.tree.command(name="inventaire", guild=guild)
+async def inventaire(interaction: discord.Interaction):
+    async with aiosqlite.connect("ultrapro.db") as db:
+        async with db.execute("SELECT item, amount FROM inventory WHERE user_id = ?", (interaction.user.id,)) as cursor:
+            items = await cursor.fetchall()
+
+    if not items:
+        return await interaction.response.send_message("Vide.")
+
+    msg = "📦 Inventaire :\n"
+    for i in items:
+        msg += f"{i[0]} x{i[1]}\n"
+
+    await interaction.response.send_message(msg)
+
+# ---------------- DAILY ----------------
+@bot.tree.command(name="quotidien", guild=guild)
+async def quotidien(interaction: discord.Interaction):
+    uid = interaction.user.id
+
+    if uid in daily and time.time() - daily[uid] < 86400:
+        return await interaction.response.send_message("⏳ Déjà récupéré aujourd'hui.")
+
+    daily[uid] = time.time()
+    gain = random.randint(200, 600)
+
+    async with aiosqlite.connect("ultrapro.db") as db:
+        await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (gain, uid))
+        await db.commit()
+
+    await interaction.response.send_message(f"🎁 +{gain} 💰")
+
+# ---------------- MESSAGE XP ----------------
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
 
-    await add_xp(message.author.id, 5)
-    await bot.process_commands(message)
+    up, level = await add_xp(message.author.id, 5)
 
-# ---------------- RUN ----------------
+    if up:
+        await message.channel.send(f"🎉 {message.author.mention} niveau {level} !")
+
+    await bot.process_commands(message)
 
 bot.run(TOKEN)
