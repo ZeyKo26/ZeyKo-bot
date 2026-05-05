@@ -4,7 +4,8 @@ import aiosqlite
 import random
 import datetime
 
-TOKEN = "TON_TOKEN_ICI"
+import os
+TOKEN = os.getenv("TOKEN")
 PREFIX = "!"
 
 intents = discord.Intents.default()
