@@ -1,39 +1,38 @@
 import discord
+from discord import app_commands
 from discord.ext import commands
 import aiosqlite
 import random
 import datetime
-
 import os
+
 TOKEN = os.getenv("TOKEN")
-PREFIX = "!"
 
 intents = discord.Intents.default()
 intents.message_content = True
+intents.members = True
 
-bot = commands.Bot(command_prefix=PREFIX, intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents)
 
-# -----------------------------
-# INITIALISATION BASE DE DONNÉES
-# -----------------------------
+# ---------------- DATABASE ----------------
 
 async def init_db():
-    async with aiosqlite.connect("zeycoins.db") as db:
+    async with aiosqlite.connect("ultrapro.db") as db:
         await db.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
-            balance INTEGER DEFAULT 0,
+            balance INTEGER DEFAULT 500,
+            bank INTEGER DEFAULT 0,
+            xp INTEGER DEFAULT 0,
+            level INTEGER DEFAULT 1,
             job TEXT DEFAULT 'chomeur',
-            last_work TEXT,
-            last_daily TEXT
+            last_work TEXT
         )
         """)
         await db.execute("""
-        CREATE TABLE IF NOT EXISTS events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT,
-            date TEXT,
-            description TEXT
+        CREATE TABLE IF NOT EXISTS config (
+            guild_id INTEGER PRIMARY KEY,
+            log_channel INTEGER
         )
         """)
         await db.commit()
@@ -41,202 +40,145 @@ async def init_db():
 @bot.event
 async def on_ready():
     await init_db()
-    print(f"Bot connecté en tant que {bot.user}")
+    await bot.tree.sync()
+    print(f"{bot.user} est prêt.")
 
-# -----------------------------
-# FONCTION UTILITAIRE
-# -----------------------------
+# ---------------- UTIL ----------------
 
 async def get_user(user_id):
-    async with aiosqlite.connect("zeycoins.db") as db:
+    async with aiosqlite.connect("ultrapro.db") as db:
         async with db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)) as cursor:
             user = await cursor.fetchone()
-            if user is None:
-                await db.execute("INSERT INTO users (user_id, balance) VALUES (?, ?)", (user_id, 100))
+            if not user:
+                await db.execute("INSERT INTO users (user_id) VALUES (?)", (user_id,))
                 await db.commit()
-                return (user_id, 100, "chomeur", None, None)
+                return (user_id, 500, 0, 0, 1, "chomeur", None)
             return user
 
-# -----------------------------
-# COMMANDE SOLDE
-# -----------------------------
+async def add_xp(user_id, amount):
+    async with aiosqlite.connect("ultrapro.db") as db:
+        async with db.execute("SELECT xp, level FROM users WHERE user_id = ?", (user_id,)) as cursor:
+            xp, level = await cursor.fetchone()
 
-@bot.command()
-async def balance(ctx):
-    user = await get_user(ctx.author.id)
-    await ctx.send(f"💰 {ctx.author.mention}, tu as **{user[1]} ZeyCoins**.")
+        xp += amount
+        needed = level * 100
 
-# -----------------------------
-# DAILY REWARD
-# -----------------------------
+        if xp >= needed:
+            level += 1
+            xp = 0
 
-@bot.command()
-async def daily(ctx):
-    user = await get_user(ctx.author.id)
-    today = datetime.date.today().isoformat()
-
-    if user[4] == today:
-        return await ctx.send("❌ Tu as déjà récupéré ton daily aujourd'hui.")
-
-    reward = random.randint(50, 150)
-
-    async with aiosqlite.connect("zeycoins.db") as db:
-        await db.execute("UPDATE users SET balance = balance + ?, last_daily = ? WHERE user_id = ?", (reward, today, ctx.author.id))
+        await db.execute("UPDATE users SET xp=?, level=? WHERE user_id=?",
+                         (xp, level, user_id))
         await db.commit()
 
-    await ctx.send(f"🎁 Tu as gagné **{reward} ZeyCoins** !")
+# ---------------- /AIDE ----------------
 
-# -----------------------------
-# MÉTIERS
-# -----------------------------
+@bot.tree.command(name="aide", description="Voir toutes les commandes")
+async def aide(interaction: discord.Interaction):
+    embed = discord.Embed(title="📖 Commandes disponibles", color=0x5865F2)
+    embed.add_field(name="💰 Économie", value="/balance /work /gamble /shop", inline=False)
+    embed.add_field(name="🏦 Banque", value="/deposit /withdraw", inline=False)
+    embed.add_field(name="⭐ XP", value="XP automatique en parlant", inline=False)
+    embed.add_field(name="📅 Event", value="/create_event", inline=False)
+    embed.add_field(name="⚙️ Admin", value="/config", inline=False)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
-jobs = {
-    "developpeur": (100, 300),
-    "streamer": (50, 200),
-    "moderateur": (80, 250),
-    "graphiste": (70, 220)
-}
+# ---------------- ECONOMIE ----------------
 
-@bot.command()
-async def jobs_list(ctx):
-    msg = "🧑‍💼 Métiers disponibles :\n"
-    for job in jobs:
-        msg += f"- {job}\n"
-    await ctx.send(msg)
+@bot.tree.command(name="balance")
+async def balance(interaction: discord.Interaction):
+    user = await get_user(interaction.user.id)
+    embed = discord.Embed(title="💰 Votre solde",
+                          description=f"Portefeuille: {user[1]} ZeyCoins\nBanque: {user[2]} ZeyCoins",
+                          color=0x2ecc71)
+    await interaction.response.send_message(embed=embed)
 
-@bot.command()
-async def setjob(ctx, job_name):
-    if job_name not in jobs:
-        return await ctx.send("❌ Métier invalide.")
+@bot.tree.command(name="deposit")
+async def deposit(interaction: discord.Interaction, amount: int):
+    user = await get_user(interaction.user.id)
+    if amount > user[1]:
+        return await interaction.response.send_message("❌ Fonds insuffisants.")
 
-    async with aiosqlite.connect("zeycoins.db") as db:
-        await db.execute("UPDATE users SET job = ? WHERE user_id = ?", (job_name, ctx.author.id))
+    async with aiosqlite.connect("ultrapro.db") as db:
+        await db.execute("UPDATE users SET balance=balance-?, bank=bank+? WHERE user_id=?",
+                         (amount, amount, interaction.user.id))
         await db.commit()
 
-    await ctx.send(f"✅ Tu es maintenant **{job_name}**.")
+    await interaction.response.send_message(f"🏦 {amount} déposés en banque.")
 
-@bot.command()
-async def work(ctx):
-    user = await get_user(ctx.author.id)
-    job = user[2]
+@bot.tree.command(name="withdraw")
+async def withdraw(interaction: discord.Interaction, amount: int):
+    user = await get_user(interaction.user.id)
+    if amount > user[2]:
+        return await interaction.response.send_message("❌ Banque insuffisante.")
 
-    if job == "chomeur":
-        return await ctx.send("❌ Tu n'as pas de métier.")
-
-    today = datetime.date.today().isoformat()
-    if user[3] == today:
-        return await ctx.send("❌ Tu as déjà travaillé aujourd'hui.")
-
-    gain = random.randint(jobs[job][0], jobs[job][1])
-
-    async with aiosqlite.connect("zeycoins.db") as db:
-        await db.execute("UPDATE users SET balance = balance + ?, last_work = ? WHERE user_id = ?", (gain, today, ctx.author.id))
+    async with aiosqlite.connect("ultrapro.db") as db:
+        await db.execute("UPDATE users SET balance=balance+?, bank=bank-? WHERE user_id=?",
+                         (amount, amount, interaction.user.id))
         await db.commit()
 
-    await ctx.send(f"💼 Tu as travaillé en tant que **{job}** et gagné **{gain} ZeyCoins**.")
+    await interaction.response.send_message(f"💵 {amount} retirés.")
 
-# -----------------------------
-# BOUTIQUE
-# -----------------------------
+# ---------------- WORK ----------------
 
-shop = {
-    "vip": 1000,
-    "role_gold": 500,
-    "ticket_event": 200
-}
+jobs = {"developpeur": (100,300), "streamer": (50,200)}
 
-@bot.command()
-async def shop_list(ctx):
-    msg = "🛒 Boutique :\n"
-    for item, price in shop.items():
-        msg += f"- {item} : {price} ZeyCoins\n"
-    await ctx.send(msg)
+@bot.tree.command(name="work")
+async def work(interaction: discord.Interaction):
+    user = await get_user(interaction.user.id)
+    gain = random.randint(100, 300)
 
-@bot.command()
-async def buy(ctx, item):
-    if item not in shop:
-        return await ctx.send("❌ Objet invalide.")
-
-    user = await get_user(ctx.author.id)
-
-    if user[1] < shop[item]:
-        return await ctx.send("❌ Pas assez d'argent.")
-
-    async with aiosqlite.connect("zeycoins.db") as db:
-        await db.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (shop[item], ctx.author.id))
+    async with aiosqlite.connect("ultrapro.db") as db:
+        await db.execute("UPDATE users SET balance=balance+? WHERE user_id=?",
+                         (gain, interaction.user.id))
         await db.commit()
 
-    await ctx.send(f"✅ Tu as acheté **{item}**.")
+    await add_xp(interaction.user.id, 20)
 
-# -----------------------------
-# CLASSEMENT
-# -----------------------------
+    await interaction.response.send_message(f"💼 Vous avez gagné {gain} ZeyCoins + 20 XP")
 
-@bot.command()
-async def leaderboard(ctx):
-    async with aiosqlite.connect("zeycoins.db") as db:
-        async with db.execute("SELECT user_id, balance FROM users ORDER BY balance DESC LIMIT 10") as cursor:
-            top = await cursor.fetchall()
+# ---------------- GAMBLE ----------------
 
-    msg = "🏆 Top 10 ZeyCoins :\n"
-    for i, user in enumerate(top, 1):
-        member = ctx.guild.get_member(user[0])
-        name = member.name if member else "Inconnu"
-        msg += f"{i}. {name} - {user[1]} ZeyCoins\n"
-
-    await ctx.send(msg)
-
-# -----------------------------
-# PARI
-# -----------------------------
-
-@bot.command()
-async def gamble(ctx, amount: int):
-    user = await get_user(ctx.author.id)
-
-    if amount <= 0:
-        return await ctx.send("❌ Montant invalide.")
-    if user[1] < amount:
-        return await ctx.send("❌ Pas assez d'argent.")
+@bot.tree.command(name="gamble")
+async def gamble(interaction: discord.Interaction, amount: int):
+    user = await get_user(interaction.user.id)
+    if amount > user[1]:
+        return await interaction.response.send_message("❌ Pas assez d'argent.")
 
     win = random.choice([True, False])
 
-    async with aiosqlite.connect("zeycoins.db") as db:
+    async with aiosqlite.connect("ultrapro.db") as db:
         if win:
-            await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, ctx.author.id))
-            await ctx.send(f"🎉 Tu as gagné {amount} ZeyCoins !")
+            await db.execute("UPDATE users SET balance=balance+? WHERE user_id=?",
+                             (amount, interaction.user.id))
+            msg = f"🎉 Vous avez gagné {amount}!"
         else:
-            await db.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (amount, ctx.author.id))
-            await ctx.send(f"💀 Tu as perdu {amount} ZeyCoins.")
+            await db.execute("UPDATE users SET balance=balance-? WHERE user_id=?",
+                             (amount, interaction.user.id))
+            msg = f"💀 Vous avez perdu {amount}."
         await db.commit()
 
-# -----------------------------
-# PLANNING ÉVÉNEMENTS
-# -----------------------------
+    await interaction.response.send_message(msg)
 
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def create_event(ctx, name, date, *, description):
-    async with aiosqlite.connect("zeycoins.db") as db:
-        await db.execute("INSERT INTO events (name, date, description) VALUES (?, ?, ?)", (name, date, description))
+# ---------------- XP AUTOMATIQUE ----------------
+
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+    await add_xp(message.author.id, 5)
+    await bot.process_commands(message)
+
+# ---------------- CONFIG LOGS ----------------
+
+@bot.tree.command(name="config")
+@app_commands.checks.has_permissions(administrator=True)
+async def config(interaction: discord.Interaction, log_channel: discord.TextChannel):
+    async with aiosqlite.connect("ultrapro.db") as db:
+        await db.execute("INSERT OR REPLACE INTO config (guild_id, log_channel) VALUES (?,?)",
+                         (interaction.guild.id, log_channel.id))
         await db.commit()
-    await ctx.send("📅 Événement créé !")
 
-@bot.command()
-async def events(ctx):
-    async with aiosqlite.connect("zeycoins.db") as db:
-        async with db.execute("SELECT name, date, description FROM events") as cursor:
-            events = await cursor.fetchall()
-
-    if not events:
-        return await ctx.send("Aucun événement prévu.")
-
-    msg = "📅 Planning des événements :\n"
-    for e in events:
-        msg += f"\n📌 {e[0]} - {e[1]}\n{e[2]}\n"
-
-    await ctx.send(msg)
-
-# -----------------------------
+    await interaction.response.send_message("⚙️ Configuration mise à jour.")
 
 bot.run(TOKEN)
